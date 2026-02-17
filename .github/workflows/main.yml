@@ -1,0 +1,27 @@
+name: Steam Envanter Botu
+
+on:
+  workflow_dispatch: # Bu satır, "Run Workflow" butonu ile manuel başlatmanı sağlar
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu Çek (Checkout)
+        uses: actions/checkout@v3
+
+      - name: Python Kurulumu
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Kütüphaneleri Yükle
+        run: |
+          pip install -r requirements.txt
+
+      - name: Botu Çalıştır
+        env: # BURASI ÇOK ÖNEMLİ: Secret'ları koda burada aktarıyoruz
+          STEAM_ID: ${{ secrets.STEAM_ID }}
+          STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }}
+        run: python main.py
