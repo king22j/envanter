@@ -4,130 +4,87 @@ import requests
 import json
 
 # GitHub Secret'tan verileri al
-STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
-raw_steam_id = os.environ.get("STEAM_ID")
+STEAM_ID = os.environ.get("STEAM_ID")
+if STEAM_ID:
+    STEAM_ID = STEAM_ID.strip()
 
-# ID Güvenlik Kontrolü ve Temizliği
-if raw_steam_id:
-    STEAM_ID = raw_steam_id.strip() # Boşlukları temizle
-else:
-    STEAM_ID = None
-
-APP_ID = 730  # CS2
-CONTEXT_ID = 2
-
-def get_inventory():
-    if not STEAM_ID:
-        print("KRİTİK HATA: STEAM_ID değişkeni boş! GitHub Secrets ayarlarını kontrol et.")
-        return None
+def test_inventory(app_id, context_id, name):
+    print(f"\n--- TEST: {name} (AppID: {app_id}) ---")
     
-    # ID'nin doğru görünüp görünmediğini kontrol edelim (güvenlik için ilk 3 ve son 3 hanesi)
-    masked_id = f"{STEAM_ID[:3]}...{STEAM_ID[-3:]}"
-    print(f"Hedef ID: {masked_id} (Uzunluk: {len(STEAM_ID)})")
-
-    # Tarayıcı taklidi yapan başlıklar
+    # URL Yapısı: count=75 yaparak yükü azaltıyoruz.
+    url = f"https://steamcommunity.com/inventory/{STEAM_ID}/{app_id}/{context_id}?l=turkish&count=75"
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         "Referer": f"https://steamcommunity.com/profiles/{STEAM_ID}/inventory",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
+        "Accept": "application/json, text/javascript, */*; q=0.01",
     }
-
-    # YÖNTEM 1: Standart Inventory API
-    url_v1 = f"https://steamcommunity.com/inventory/{STEAM_ID}/{APP_ID}/{CONTEXT_ID}?l=turkish&count=5000"
     
-    print(f"Yöntem 1 deneniyor (Inventory API)...")
+    print(f"İstek gönderiliyor: {url}")
+    
     try:
-        response = requests.get(url_v1, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
+        print(f"Durum Kodu: {response.status_code}")
         
-        if response.status_code == 200:
-            return parse_inventory(response.json())
-        else:
-            print(f"Yöntem 1 Başarısız. Kod: {response.status_code}")
-            if response.status_code == 400:
-                print("  -> Hata 400: İstek hatalı. URL veya ID formatı bozuk olabilir.")
-    except Exception as e:
-        print(f"Yöntem 1 Hatası: {e}")
-
-    # YÖNTEM 2: Eski JSON Endpoint (Yedek)
-    print("Yöntem 2 deneniyor (Eski Profil API)...")
-    url_v2 = f"https://steamcommunity.com/profiles/{STEAM_ID}/inventory/json/{APP_ID}/{CONTEXT_ID}"
-    
-    try:
-        response = requests.get(url_v2, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            if data.get("success"):
-                return parse_inventory_v2(data)
-        
-        print(f"Yöntem 2 de başarısız. Kod: {response.status_code}")
-        print(f"Dönen Mesaj: {response.text[:100]}...") # Hatanın ilk 100 karakteri
-        
+            if data and 'assets' in data:
+                print(f"✅ BAŞARILI! {len(data['assets'])} adet item bulundu.")
+                return data['assets']
+            elif data and 'total_inventory_count' in data and data['total_inventory_count'] == 0:
+                print("⚠️ Envanter erişilebilir ama BOŞ (0 item).")
+                return None
+            else:
+                print("⚠️ Veri geldi ama format beklenmedik.")
+                # Hata ayıklama için gelen verinin başını yazdıralım
+                print(f"Gelen Veri Özeti: {str(data)[:200]}")
+                return None
+                
+        elif response.status_code == 400:
+            print("❌ HATA 400 (Bad Request):")
+            print("  1. Bu oyun için envanterin henüz oluşmamış olabilir.")
+            print("  2. Steam, GitHub IP'sini engelliyor olabilir.")
+            
+        elif response.status_code == 403:
+            print("❌ HATA 403 (Forbidden): Profil GİZLİ veya IP Banlı.")
+            
+        elif response.status_code == 429:
+            print("❌ HATA 429: Çok hızlı istek atıldı (Rate Limit).")
+            
+        # Hata varsa içeriği görelim
+        if response.status_code != 200:
+            try:
+                print(f"Steam'den Gelen Mesaj: {response.text}")
+            except:
+                pass
+                
     except Exception as e:
-        print(f"Yöntem 2 Hatası: {e}")
-
+        print(f"Bağlantı Hatası: {e}")
+    
     return None
 
-def parse_inventory(data):
-    """Yeni API formatını işler"""
-    if not data or 'assets' not in data:
-        return []
-    
-    descriptions = {f"{d['classid']}_{d['instanceid']}": d for d in data.get('descriptions', [])}
-    items = []
-    
-    for asset in data['assets']:
-        key = f"{asset['classid']}_{asset['instanceid']}"
-        if key in descriptions:
-            desc = descriptions[key]
-            if desc.get('marketable') == 1:
-                items.append(desc['market_hash_name'])
-    return items
-
-def parse_inventory_v2(data):
-    """Eski API formatını işler"""
-    items = []
-    rg_descriptions = data.get("rgDescriptions", {})
-    rg_inventory = data.get("rgInventory", {})
-    
-    for item_id, item_data in rg_inventory.items():
-        class_id = item_data.get("classid")
-        instance_id = item_data.get("instanceid")
-        key = f"{class_id}_{instance_id}"
-        
-        if key in rg_descriptions:
-            desc = rg_descriptions[key]
-            if desc.get("marketable") == 1:
-                items.append(desc["market_hash_name"])
-    return items
-
-def get_price(market_hash_name):
-    # Fiyat çekme fonksiyonu (Değişmedi)
-    url = "https://steamcommunity.com/market/priceoverview/"
-    params = {'country': 'TR', 'currency': 34, 'appid': APP_ID, 'market_hash_name': market_hash_name}
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res = requests.get(url, params=params, headers=headers)
-        data = res.json()
-        if 'lowest_price' in data: return data['lowest_price']
-    except:
-        pass
-    return "Bulunamadı"
-
 def main():
-    items = get_inventory()
+    if not STEAM_ID:
+        print("HATA: STEAM_ID yok!")
+        return
+
+    # TEST 1: Steam Topluluk Eşyaları (Kartlar, vb.)
+    # Bunu herkesin envanterinde en az 1 tane bir şey vardır diye deniyoruz.
+    # Eğer bu çalışırsa ID ve IP sağlam demektir.
+    test_inventory(753, 6, "Steam Topluluk (Kartlar)")
     
-    if items:
-        print(f"\nBAŞARILI! Toplam {len(items)} satılabilir eşya bulundu.\n")
-        print(f"{'ITEM ADI':<50} | {'FİYAT'}")
-        print("-" * 65)
-        
-        for item in items[:5]: # Test için ilk 5
-            price = get_price(item)
-            print(f"{item:<50} | {price}")
-            time.sleep(3)
-    else:
-        print("\nSONUÇ: İki yöntem de başarısız oldu.")
-        print("Lütfen GitHub Secrets kısmında 'STEAM_ID'nin başında/sonunda boşluk olmadığından emin ol.")
+    time.sleep(2) # Bekle
+    
+    # TEST 2: CS2 (Counter-Strike 2)
+    # Asıl istediğimiz bu.
+    assets = test_inventory(730, 2, "CS2 (Counter-Strike)")
+
+    # Eğer CS2 itemleri geldiyse fiyat çekmeyi deneyelim
+    if assets:
+        print("\n--- Fiyat Kontrolü (İlk 3 İtem) ---")
+        # Description verisi olmadığı için sadece assets sayısını doğruladık
+        # Gerçek kodda description ile birleştirmek gerekir ama şu an sorunu çözmeye odaklıyız.
+        print("Envanter bağlantısı doğrulandı. Tam kodu çalıştırmak için hazırsın.")
 
 if __name__ == "__main__":
     main()
