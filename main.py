@@ -3,88 +3,153 @@ import time
 import requests
 import json
 
-# GitHub Secret'tan verileri al
+# AYARLAR
 STEAM_ID = os.environ.get("STEAM_ID")
 if STEAM_ID:
     STEAM_ID = STEAM_ID.strip()
 
-def test_inventory(app_id, context_id, name):
-    print(f"\n--- TEST: {name} (AppID: {app_id}) ---")
+APP_ID = 730  # CS2
+CONTEXT_ID = 2
+BATCH_SIZE = 100  # Tek seferde istenecek item sayısı (Güvenli sınır: 100)
+
+def get_full_inventory():
+    """
+    Sayfalama (Pagination) yaparak tüm envanteri çeker.
+    """
+    if not STEAM_ID:
+        print("HATA: STEAM_ID yok!")
+        return []
+
+    print(f"ID: {STEAM_ID} için envanter taranıyor (Her istekte {BATCH_SIZE} item)...")
     
-    # URL Yapısı: count=75 yaparak yükü azaltıyoruz.
-    url = f"https://steamcommunity.com/inventory/{STEAM_ID}/{app_id}/{context_id}?l=turkish&count=75"
-    
+    all_items = []
+    start_assetid = None
+    more_items = True
+    page = 1
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         "Referer": f"https://steamcommunity.com/profiles/{STEAM_ID}/inventory",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
     }
-    
-    print(f"İstek gönderiliyor: {url}")
+
+    while more_items:
+        url = f"https://steamcommunity.com/inventory/{STEAM_ID}/{APP_ID}/{CONTEXT_ID}?l=turkish&count={BATCH_SIZE}"
+        
+        # Eğer önceki sayfadan devam ediyorsak 'start_assetid' ekle
+        if start_assetid:
+            url += f"&start_assetid={start_assetid}"
+            
+        try:
+            print(f"Sayfa {page} çekiliyor...", end=" ")
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code != 200:
+                print(f"HATA (Kod: {response.status_code}) - Döngü durduruluyor.")
+                break
+                
+            data = response.json()
+            
+            if not data or 'assets' not in data:
+                print("Veri bitti veya boş.")
+                break
+
+            # Varlıkları ve Tanımları İşle
+            descriptions = {f"{d['classid']}_{d['instanceid']}": d for d in data.get('descriptions', [])}
+            
+            current_batch = []
+            for asset in data['assets']:
+                key = f"{asset['classid']}_{asset['instanceid']}"
+                if key in descriptions:
+                    desc = descriptions[key]
+                    # Sadece satılabilir (marketable) olanları listeye ekle
+                    if desc.get('marketable') == 1:
+                        current_batch.append(desc['market_hash_name'])
+            
+            all_items.extend(current_batch)
+            print(f"✅ {len(current_batch)} yeni item eklendi.")
+
+            # Sayfalama Kontrolü
+            more_items = data.get('more_items', 0) == 1
+            start_assetid = data.get('last_assetid')
+            
+            page += 1
+            time.sleep(2) # Steam'i yormamak için kısa bekleme
+
+        except Exception as e:
+            print(f"\nBağlantı koptu: {e}")
+            break
+
+    return all_items
+
+def get_price(market_hash_name):
+    """
+    Fiyat çeker. Hata alırsa '0' döner.
+    """
+    url = "https://steamcommunity.com/market/priceoverview/"
+    params = {'country': 'TR', 'currency': 34, 'appid': APP_ID, 'market_hash_name': market_hash_name}
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        print(f"Durum Kodu: {response.status_code}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data and 'assets' in data:
-                print(f"✅ BAŞARILI! {len(data['assets'])} adet item bulundu.")
-                return data['assets']
-            elif data and 'total_inventory_count' in data and data['total_inventory_count'] == 0:
-                print("⚠️ Envanter erişilebilir ama BOŞ (0 item).")
-                return None
-            else:
-                print("⚠️ Veri geldi ama format beklenmedik.")
-                # Hata ayıklama için gelen verinin başını yazdıralım
-                print(f"Gelen Veri Özeti: {str(data)[:200]}")
-                return None
-                
-        elif response.status_code == 400:
-            print("❌ HATA 400 (Bad Request):")
-            print("  1. Bu oyun için envanterin henüz oluşmamış olabilir.")
-            print("  2. Steam, GitHub IP'sini engelliyor olabilir.")
+        res = requests.get(url, params=params, headers=headers, timeout=5)
+        if res.status_code == 429:
+            print("(Rate Limit - 30sn Bekleniyor...)")
+            time.sleep(30)
+            return get_price(market_hash_name) # Tekrar dene
             
-        elif response.status_code == 403:
-            print("❌ HATA 403 (Forbidden): Profil GİZLİ veya IP Banlı.")
-            
-        elif response.status_code == 429:
-            print("❌ HATA 429: Çok hızlı istek atıldı (Rate Limit).")
-            
-        # Hata varsa içeriği görelim
-        if response.status_code != 200:
-            try:
-                print(f"Steam'den Gelen Mesaj: {response.text}")
-            except:
-                pass
-                
-    except Exception as e:
-        print(f"Bağlantı Hatası: {e}")
-    
-    return None
+        data = res.json()
+        if 'lowest_price' in data:
+            # Örnek: "15,40 TL" -> 15.40 (Float) çevirimi
+            price_str = data['lowest_price'].replace("TL", "").replace(".", "").replace(",", ".").strip()
+            return float(price_str), data['lowest_price']
+    except:
+        pass
+    return 0.0, "Yok"
 
 def main():
-    if not STEAM_ID:
-        print("HATA: STEAM_ID yok!")
+    items = get_full_inventory()
+    
+    if not items:
+        print("Envanter boş veya çekilemedi.")
         return
 
-    # TEST 1: Steam Topluluk Eşyaları (Kartlar, vb.)
-    # Bunu herkesin envanterinde en az 1 tane bir şey vardır diye deniyoruz.
-    # Eğer bu çalışırsa ID ve IP sağlam demektir.
-    test_inventory(753, 6, "Steam Topluluk (Kartlar)")
+    print(f"\nToplam {len(items)} satılabilir item bulundu. Fiyatlandırma başlıyor...\n")
+    print("NOT: Çok fazla item varsa bu işlem uzun sürebilir (her item için 3 saniye).")
     
-    time.sleep(2) # Bekle
-    
-    # TEST 2: CS2 (Counter-Strike 2)
-    # Asıl istediğimiz bu.
-    assets = test_inventory(730, 2, "CS2 (Counter-Strike)")
+    total_value = 0.0
+    report_lines = []
 
-    # Eğer CS2 itemleri geldiyse fiyat çekmeyi deneyelim
-    if assets:
-        print("\n--- Fiyat Kontrolü (İlk 3 İtem) ---")
-        # Description verisi olmadığı için sadece assets sayısını doğruladık
-        # Gerçek kodda description ile birleştirmek gerekir ama şu an sorunu çözmeye odaklıyız.
-        print("Envanter bağlantısı doğrulandı. Tam kodu çalıştırmak için hazırsın.")
+    # Tablo Başlığı
+    header = f"{'ITEM ADI':<50} | {'FİYAT'}"
+    print(header)
+    print("-" * 65)
+    report_lines.append(header)
+    report_lines.append("-" * 65)
+
+    # ÖNEMLİ: Github Action süresi dolmasın diye örnek olarak ilk 20 itemi tarıyoruz.
+    # Tüm envanter için [:20] kısmını silip sadece 'items' yazmalısın.
+    for i, item_name in enumerate(items[:20], 1): 
+        val, val_str = get_price(item_name)
+        total_value += val
+        
+        line = f"{i}. {item_name:<46} | {val_str}"
+        print(line)
+        report_lines.append(line)
+        
+        time.sleep(3) # Steam Market API ban yememek için bekleme
+
+    # Toplam Sonuç
+    footer = "\n" + "-" * 65
+    summary = f"TOPLAM TAHMİNİ DEĞER: {total_value:.2f} TL"
+    
+    print(footer)
+    print(summary)
+    report_lines.append(footer)
+    report_lines.append(summary)
+    
+    # Raporu Dosyaya Kaydet (Github Artifacts için)
+    with open("envanter_raporu.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines))
 
 if __name__ == "__main__":
     main()
