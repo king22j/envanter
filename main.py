@@ -1,106 +1,101 @@
-import requests
-import time
 import os
-from dotenv import load_dotenv
+import time
+import requests
+import json
 
-# .env dosyasından gizli verileri yükle
-load_dotenv()
+# Şifreleri ve ID'yi sistemden (GitHub Secrets veya .env) çekiyoruz
+STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
+STEAM_ID = os.environ.get("STEAM_ID")
 
-# AYARLAR
-STEAM_API_KEY = os.getenv("STEAM_API_KEY")
-STEAM_ID = os.getenv("STEAM_ID")
-APP_ID = 730  # 730 = CS2, 252490 = Rust, 570 = Dota 2
-CURRENCY = 1  # 1 = USD, 3 = Euro, 34 = TL (Bazen API TL desteklemeyebilir, USD garantidir)
+# Sabitler (CS2 için 730)
+APP_ID = 730
+CONTEXT_ID = 2
 
-def get_steam_inventory(steam_id, app_id):
-    """
-    Kullanıcının envanter verisini çeker.
-    Steam envanter endpoint'i assets ve descriptions olarak iki parça döner.
-    """
-    url = f"https://steamcommunity.com/inventory/{steam_id}/{app_id}/2?l=turkish&count=5000"
+def get_inventory():
+    """Steam envanterini çeker."""
+    if not STEAM_ID:
+        print("HATA: STEAM_ID bulunamadı!")
+        return None
+
+    print(f"ID: {STEAM_ID} için envanter taranıyor...")
+    
+    # Steam Inventory Endpoint
+    url = f"https://steamcommunity.com/inventory/{STEAM_ID}/{APP_ID}/{CONTEXT_ID}?l=turkish&count=5000"
     
     try:
         response = requests.get(url)
-        if response.status_code == 429:
-            print("Çok fazla istek gönderildi (Rate Limit). Lütfen bekleyin.")
-            return None
         
+        if response.status_code == 403:
+            print("HATA: Profilin veya envanterin gizli! Lütfen 'Herkese Açık' yap.")
+            return None
+        if response.status_code == 429:
+            print("HATA: Çok fazla istek atıldı (Rate Limit).")
+            return None
+            
         data = response.json()
         
         if not data or 'assets' not in data:
-            print("Envanter boş veya gizli.")
+            print("Envanter boş veya okunamadı.")
             return None
 
-        # Descriptionları kolay erişim için sözlüğe çeviriyoruz
+        # Varlıkları ve tanımları eşleştirme
         descriptions = {f"{d['classid']}_{d['instanceid']}": d for d in data['descriptions']}
-        
-        inventory = []
-        
+        inventory_items = []
+
         for asset in data['assets']:
             key = f"{asset['classid']}_{asset['instanceid']}"
             if key in descriptions:
                 desc = descriptions[key]
-                
-                # Sadece pazarlanabilir (satılabilir) itemleri al
+                # Sadece satılabilir itemleri al
                 if desc.get('marketable') == 1:
-                    item = {
-                        'name': desc['market_hash_name'], # Pazar araması için bu isim şart
-                        'type': desc.get('type', ''),
-                        'classid': asset['classid']
-                    }
-                    inventory.append(item)
-        
-        return inventory
+                    inventory_items.append(desc['market_hash_name'])
+
+        return inventory_items
 
     except Exception as e:
-        print(f"Hata oluştu: {e}")
+        print(f"Bir hata oluştu: {e}")
         return None
 
-def get_item_price(market_hash_name, app_id):
-    """
-    Tek bir itemin pazar fiyatını çeker.
-    DİKKAT: Çok hızlı çalıştırılırsa IP ban yer.
-    """
-    url = f"https://steamcommunity.com/market/priceoverview/"
+def get_price(market_hash_name):
+    """Itemin en düşük fiyatını çeker."""
+    url = "https://steamcommunity.com/market/priceoverview/"
     params = {
         'country': 'TR',
-        'currency': 34, # 34 = Türk Lirası
-        'appid': app_id,
+        'currency': 34, # 34 = TL
+        'appid': APP_ID,
         'market_hash_name': market_hash_name
     }
     
     try:
         response = requests.get(url, params=params)
         data = response.json()
-        
-        if 'lowest_price' in data:
+        if data and 'lowest_price' in data:
             return data['lowest_price']
-        else:
-            return "Fiyat Bulunamadı"
-            
-    except Exception as e:
-        return None
+        return "Fiyat Yok"
+    except:
+        return "Hata"
 
 def main():
-    print(f"Steam ID: {STEAM_ID} için envanter taranıyor...")
+    if not STEAM_API_KEY:
+        print("UYARI: STEAM_API_KEY girilmemiş (Bazı özellikler kısıtlı olabilir).")
+
+    items = get_inventory()
     
-    inventory = get_steam_inventory(STEAM_ID, APP_ID)
-    
-    if inventory:
-        print(f"Toplam {len(inventory)} adet satılabilir item bulundu.\n")
-        print(f"{'ITEM ADI':<50} | {'FİYAT'}")
-        print("-" * 65)
+    if items:
+        print(f"\nToplam {len(items)} satılabilir eşya bulundu. Fiyatlar çekiliyor...\n")
+        print(f"{'ITEM ADI':<60} | {'FİYAT'}")
+        print("-" * 75)
         
-        # Örnek olarak sadece ilk 5 itemi tarıyoruz (API Ban yememek için)
-        # Hepsini taramak isterseniz inventory[:5] kısmını inventory yapın.
-        for item in inventory[:5]: 
-            price = get_item_price(item['name'], APP_ID)
-            print(f"{item['name']:<50} | {price}")
+        # GitHub Action süresi dolmasın diye örnek olarak ilk 10 itemi çekiyoruz.
+        # Hepsini çekmek istersen [:10] kısmını sil.
+        for item_name in items[:10]:
+            price = get_price(item_name)
+            print(f"{item_name:<60} | {price}")
             
-            # Steam API rate limitine takılmamak için bekleme süresi
-            time.sleep(3) 
+            # Steam API banlamaması için bekleme süresi
+            time.sleep(3)
     else:
-        print("Envanter alınamadı.")
+        print("İşlem başarısız oldu.")
 
 if __name__ == "__main__":
     main()
