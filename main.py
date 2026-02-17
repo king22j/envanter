@@ -2,6 +2,8 @@ import os
 import time
 import requests
 import json
+import urllib.parse
+from collections import Counter
 
 # AYARLAR
 STEAM_ID = os.environ.get("STEAM_ID")
@@ -10,17 +12,15 @@ if STEAM_ID:
 
 APP_ID = 730  # CS2
 CONTEXT_ID = 2
-BATCH_SIZE = 100  # Tek seferde istenecek item sayısı (Güvenli sınır: 100)
+BATCH_SIZE = 100
 
 def get_full_inventory():
-    """
-    Sayfalama (Pagination) yaparak tüm envanteri çeker.
-    """
+    """Tüm envanteri çeker ve item isimlerini listeler."""
     if not STEAM_ID:
         print("HATA: STEAM_ID yok!")
         return []
 
-    print(f"ID: {STEAM_ID} için envanter taranıyor (Her istekte {BATCH_SIZE} item)...")
+    print(f"ID: {STEAM_ID} envanteri taranıyor...")
     
     all_items = []
     start_assetid = None
@@ -35,121 +35,129 @@ def get_full_inventory():
 
     while more_items:
         url = f"https://steamcommunity.com/inventory/{STEAM_ID}/{APP_ID}/{CONTEXT_ID}?l=turkish&count={BATCH_SIZE}"
-        
-        # Eğer önceki sayfadan devam ediyorsak 'start_assetid' ekle
         if start_assetid:
             url += f"&start_assetid={start_assetid}"
             
         try:
-            print(f"Sayfa {page} çekiliyor...", end=" ")
             response = requests.get(url, headers=headers, timeout=15)
-            
             if response.status_code != 200:
-                print(f"HATA (Kod: {response.status_code}) - Döngü durduruluyor.")
+                print(f"Envanter çekilemedi (Hata: {response.status_code})")
                 break
                 
             data = response.json()
-            
             if not data or 'assets' not in data:
-                print("Veri bitti veya boş.")
                 break
 
-            # Varlıkları ve Tanımları İşle
             descriptions = {f"{d['classid']}_{d['instanceid']}": d for d in data.get('descriptions', [])}
             
-            current_batch = []
             for asset in data['assets']:
                 key = f"{asset['classid']}_{asset['instanceid']}"
                 if key in descriptions:
                     desc = descriptions[key]
-                    # Sadece satılabilir (marketable) olanları listeye ekle
                     if desc.get('marketable') == 1:
-                        current_batch.append(desc['market_hash_name'])
+                        all_items.append(desc['market_hash_name'])
             
-            all_items.extend(current_batch)
-            print(f"✅ {len(current_batch)} yeni item eklendi.")
-
-            # Sayfalama Kontrolü
             more_items = data.get('more_items', 0) == 1
             start_assetid = data.get('last_assetid')
-            
             page += 1
-            time.sleep(2) # Steam'i yormamak için kısa bekleme
+            time.sleep(1) # Sayfa geçişi beklemesi
 
         except Exception as e:
-            print(f"\nBağlantı koptu: {e}")
+            print(f"Hata: {e}")
             break
 
     return all_items
 
 def get_price(market_hash_name):
-    """
-    Fiyat çeker. Hata alırsa '0' döner.
-    """
-    url = "https://steamcommunity.com/market/priceoverview/"
-    params = {'country': 'TR', 'currency': 34, 'appid': APP_ID, 'market_hash_name': market_hash_name}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    """Fiyat çeker. URL encoding yaparak hataları azaltır."""
+    # İsimdeki özel karakterleri (™ | boşluk) URL formatına çevir
+    encoded_name = urllib.parse.quote(market_hash_name)
+    
+    url = f"https://steamcommunity.com/market/priceoverview/?country=TR&currency=34&appid={APP_ID}&market_hash_name={encoded_name}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Referer": "https://steamcommunity.com/market/",
+        "Accept": "application/json" 
+    }
     
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=10)
+        
         if res.status_code == 429:
-            print("(Rate Limit - 30sn Bekleniyor...)")
-            time.sleep(30)
+            print(f"   ⚠️ Hızlı istek engeli (429). 10sn bekleniyor...")
+            time.sleep(10)
             return get_price(market_hash_name) # Tekrar dene
-            
+
         data = res.json()
-        if 'lowest_price' in data:
-            # Örnek: "15,40 TL" -> 15.40 (Float) çevirimi
-            price_str = data['lowest_price'].replace("TL", "").replace(".", "").replace(",", ".").strip()
-            return float(price_str), data['lowest_price']
-    except:
+        
+        # lowest_price yoksa median_price dene
+        price_raw = data.get('lowest_price') or data.get('median_price')
+        
+        if price_raw:
+            # "15,40 TL" -> 15.40 Float çevirimi
+            # Önce "TL" ve boşlukları sil
+            clean_str = price_raw.replace("TL", "").replace("USD", "").strip()
+            # Binlik ayracı (.) varsa sil, ondalık ayracı (,) varsa nokta yap
+            # Örnek: 1.250,50 -> 1250.50
+            if "," in clean_str:
+                clean_str = clean_str.replace(".", "").replace(",", ".")
+            
+            try:
+                return float(clean_str), price_raw
+            except:
+                return 0.0, price_raw # Çeviremezse string olarak kalsın
+                
+    except Exception as e:
         pass
-    return 0.0, "Yok"
+        
+    return 0.0, "Çekilemedi"
 
 def main():
+    # 1. Envanteri Çek
     items = get_full_inventory()
-    
     if not items:
-        print("Envanter boş veya çekilemedi.")
+        print("Envanter boş veya erişilemedi.")
         return
 
-    print(f"\nToplam {len(items)} satılabilir item bulundu. Fiyatlandırma başlıyor...\n")
-    print("NOT: Çok fazla item varsa bu işlem uzun sürebilir (her item için 3 saniye).")
+    # 2. İtemleri Grupla (Örn: 50 tane Kasa -> 1 tane Kasa x 50)
+    # Counter, listeyi sayar ve sözlük yapar: {'Kasa': 50, 'Skin': 1}
+    item_counts = Counter(items)
+    unique_items = list(item_counts.keys())
     
-    total_value = 0.0
-    report_lines = []
-
+    print(f"\nToplam {len(items)} adet item bulundu.")
+    print(f"Gruplandıktan sonra {len(unique_items)} benzersiz item sorgulanacak.\n")
+    
+    total_inventory_value = 0.0
+    
     # Tablo Başlığı
-    header = f"{'ITEM ADI':<50} | {'FİYAT'}"
-    print(header)
-    print("-" * 65)
-    report_lines.append(header)
-    report_lines.append("-" * 65)
-
-    # ÖNEMLİ: Github Action süresi dolmasın diye örnek olarak ilk 20 itemi tarıyoruz.
-    # Tüm envanter için [:20] kısmını silip sadece 'items' yazmalısın.
-    for i, item_name in enumerate(items[:20], 1): 
-        val, val_str = get_price(item_name)
-        total_value += val
-        
-        line = f"{i}. {item_name:<46} | {val_str}"
-        print(line)
-        report_lines.append(line)
-        
-        time.sleep(3) # Steam Market API ban yememek için bekleme
-
-    # Toplam Sonuç
-    footer = "\n" + "-" * 65
-    summary = f"TOPLAM TAHMİNİ DEĞER: {total_value:.2f} TL"
+    print(f"{'ADET':<5} | {'ITEM ADI':<50} | {'BİRİM':<12} | {'TOPLAM'}")
+    print("-" * 85)
     
-    print(footer)
-    print(summary)
-    report_lines.append(footer)
-    report_lines.append(summary)
-    
-    # Raporu Dosyaya Kaydet (Github Artifacts için)
-    with open("envanter_raporu.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(report_lines))
+    # 3. Fiyatları Sorgula (Sadece benzersiz itemler için)
+    for name in unique_items:
+        count = item_counts[name]
+        
+        # Fiyatı çek
+        unit_val, unit_str = get_price(name)
+        
+        # Toplamı hesapla
+        line_total = unit_val * count
+        total_inventory_value += line_total
+        
+        # Ekrana bas
+        if unit_val > 0:
+            print(f"{count:<5} | {name:<50} | {unit_str:<12} | {line_total:.2f} TL")
+        else:
+            print(f"{count:<5} | {name:<50} | {'Yok':<12} | -")
+            
+        # Bekleme süresi (Steam Ban Yememek İçin)
+        # Önceki kodda 3 saniyeydi, şimdi grupladığımız için istek azaldı ama yine de 
+        # güvenli olsun diye 3 saniye tutuyoruz.
+        time.sleep(3)
+
+    print("-" * 85)
+    print(f"GENEL TOPLAM TAHMİNİ DEĞER: {total_inventory_value:.2f} TL")
 
 if __name__ == "__main__":
     main()
